@@ -163,13 +163,13 @@ def parse_column_func(column_string):
     Parses a column from the URL.
 
     expected format: column_name
-    expected format: function->column_name where function is 'avg' or 'count' etc
+    expected format: function:column_name where function is 'avg' or 'count' etc
 
     :param sort_string: string
     :return:
     """
     table_name = None
-    clean_vals = [s.strip() for s in column_string.split('->')]
+    clean_vals = [s.strip() for s in column_string.split(':')]
     column_name = clean_vals[-1]
     func_name = None
 
