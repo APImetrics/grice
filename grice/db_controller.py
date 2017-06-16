@@ -1,7 +1,7 @@
 from collections import OrderedDict
 
 from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnFilter, ColumnSort, SORT_DIRECTIONS, \
-    ColumnPair, TableJoin
+    ColumnPair, TableJoin, ColumnFunction, SUPPORTED_FUNCS
 from flask import Flask, jsonify, render_template, request
 
 from grice.errors import NotFoundError, JoinError
@@ -158,6 +158,56 @@ def parse_join(join_str, outer_join: bool):
     return TableJoin(table_name, column_pairs, outer_join)
 
 
+def parse_column_func(column_string):
+    """
+    Parses a column from the URL.
+
+    expected format: column_name
+    expected format: function->column_name where function is 'avg' or 'count' etc
+
+    :param sort_string: string
+    :return:
+    """
+    table_name = None
+    clean_vals = [s.strip() for s in column_string.split('->')]
+    column_name = clean_vals[-1]
+    func_name = None
+
+    if len(clean_vals) > 1:
+        func_name = clean_vals[0].lower()
+
+    if not func_name and column_name == '':
+        raise ValueError('column_name cannot be blank')
+
+    if func_name and func_name not in SUPPORTED_FUNCS:
+        raise ValueError('invalid function')
+
+    try:
+        table_name, column_name = column_name.split('.')
+    except ValueError:
+        # This means the column name is not in the table_name.column_name format, which is fine.
+        pass
+
+    return ColumnFunction(table_name, column_name, func_name)
+
+def parse_column_funcs(column_list):
+    """
+    This method parses column strings from the URL.
+
+    :param column_list:
+    :return:
+    """
+
+    funcs = []
+    for col_string in column_list:
+        try:
+            column_func = parse_column_func(col_string)
+        except ValueError:
+            continue
+        funcs.append(column_func)
+
+    return funcs
+
 def parse_col_names(column_names):
     """
     This method takes a string of comma-seperated column names and returns a list of column names.
@@ -186,7 +236,7 @@ def parse_query_args(query_args):
     filters = parse_filters(query_args.getlist('filter'))
     sorts = parse_sorts(query_args.getlist('sort'))
     join = parse_join(query_args.get('join'), False) or parse_join(query_args.get('outerjoin'), True)
-    column_names = parse_col_names(query_args.get('cols', None))
+    column_names = parse_column_funcs(query_args.getlist('columns')) or parse_column_funcs(query_args.get('cols', '').split(','))
     group_by = parse_col_names(query_args.get('group_by', None))
 
     return column_names, page, per_page, filters, sorts, join, group_by
@@ -230,7 +280,7 @@ class DBController:
             return jsonify(success=False, error=str(e)), 404
 
         try:
-            rows, columns = self.db_service.query_table(name, column_names, page, per_page, filters, sorts, join, group_by, 
+            rows, columns = self.db_service.query_table(name, column_names, page, per_page, filters, sorts, join, group_by,
                 format_as_list=request.args.get('_list', '').lower() in ['t', 'true', '1'])
         except JoinError as e:
             return jsonify(error=str(e)), 400

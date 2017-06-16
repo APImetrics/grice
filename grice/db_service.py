@@ -3,9 +3,10 @@ import urllib
 
 from sqlalchemy import create_engine, MetaData, Column, Table, select, not_, or_, asc, desc, and_
 from sqlalchemy import engine
+from sqlalchemy import func as sql_func
 from sqlalchemy.sql import Select
+from sqlalchemy.sql.functions import Function
 from sqlalchemy.engine import reflection
-
 from grice.errors import ConfigurationError, NotFoundError, JoinError
 
 
@@ -14,7 +15,9 @@ DEFAULT_PER_PAGE = 50
 LIST_FILTERS = ['in', 'not_in', 'bt', 'nbt']
 FILTER_TYPES = ['lt', 'lte', 'eq', 'neq', 'gt', 'gte'] + LIST_FILTERS
 SORT_DIRECTIONS = ['asc', 'desc']
+SUPPORTED_FUNCS = ['avg', 'count', 'min', 'max', 'sum']
 ColumnSort = namedtuple('ColumnSort', ['table_name', 'column_name', 'direction'])
+ColumnFunction = namedtuple('ColumnFunction', ['table_name', 'column_name', 'func_name'])
 ColumnPair = namedtuple('ColumnPair', ['from_column', 'to_column'])
 TableJoin = namedtuple('TableJoin', ['table_name', 'column_pairs', 'outer_join'])
 
@@ -45,6 +48,14 @@ def init_database(db_config):
 
     return create_engine(eng_url)
 
+
+def function_to_dict(func: Function):
+    data = {
+        'name': str(func),
+        'primary_key': func.primary_key,
+        'table': '<Function {}>'.format(func.name),
+    }
+    return data
 
 def column_to_dict(column: Column):
     """
@@ -85,6 +96,14 @@ def table_to_dict(table: Table):
     }
 
 
+def _get_column(table_name, column_name, tables):
+    if table_name:
+        for table in tables:
+            if table_name == table.name:
+                return table.columns.get(column_name, None)
+        return None
+    return tables[0].columns.get(column_name, None)
+
 def get_column(column_name, table: Table, join_table: Table):
     """
     Converts a column name to a column object.
@@ -94,23 +113,26 @@ def get_column(column_name, table: Table, join_table: Table):
     :param join_table: The table we are joining on, can be None.
     :return: SqlAlchemy column object.
     """
-    table_name = None
 
-    try:
-        column_name, table_name = column_name.split('.')
-    except ValueError:
-        # This is fine, this means that this isn't a fully qualified column name.
-        pass
+    if isinstance(column_name, ColumnFunction):
+        func_name = column_name.func_name
+        table_name = column_name.table_name
+        column_name = column_name.column_name
 
-    if table_name:
-        if table_name == table.name:
-            return table.columns.get(column_name, None)
-        elif join_table is not None and table_name == join_table.name:
-            return join_table.columns.get(column_name, None)
-        else:
-            return None
+    else:
+        func_name = None
+        table_name = None
 
-    return table.columns.get(column_name, None)
+        try:
+            column_name, table_name = column_name.split('.')
+        except ValueError:
+            # This is fine, this means that this isn't a fully qualified column name.
+            pass
+
+    column = _get_column(table_name, column_name, [table, join_table])
+    if func_name:
+        return getattr(sql_func, func_name)(column)
+    return column
 
 
 def names_to_columns(column_names, table: Table, join_table: Table):
@@ -122,7 +144,7 @@ def names_to_columns(column_names, table: Table, join_table: Table):
     :param join_table: The table we are joining on, can be None.
     :return: list of SqlAlchemy column objects.
     """
-    if column_names is None:
+    if not column_names:
         columns = table.columns.values()
 
         if join_table is not None:
@@ -441,8 +463,6 @@ class DBService:
         if len(columns) == 0:
             return [], []
 
-        # group_by_cols = names_to_columns(group_by, table, join_table) if group_by else None
-
         query = select(columns).apply_labels()
 
         if per_page > -1:
@@ -464,21 +484,33 @@ class DBService:
             result = conn.execute(query)
 
             for row in result:
+                count_of_map = {}
                 if format_as_list:
                     data = []
                     for column in columns:
-                        column_label = column.table.name + '_' + column.name
+                        if isinstance(column, Function):
+                            counter = count_of_map.get(column.name, 0) + 1
+                            count_of_map[column.name] = counter
+                            column_label = column.name + '_' + str(counter)
+                        else:
+                            column_label = column.table.name + '_' + column.name
                         data.append(row[column_label])
                 else:
                     data = {}
                     for column in columns:
-                        full_column_name = column.table.name + '.' + column.name
-                        column_label = column.table.name + '_' + column.name
+                        if isinstance(column, Function):
+                            counter = count_of_map.get(column.name, 0) + 1
+                            count_of_map[column.name] = counter
+                            full_column_name = column.name + '_' + str(counter)
+                            column_label = column.name + '_' + str(counter)
+                        else:
+                            full_column_name = column.table.name + '.' + column.name
+                            column_label = column.table.name + '_' + column.name
                         data[full_column_name] = row[column_label]
 
                 rows.append(data)
 
-        column_data = [column_to_dict(column) for column in columns]
+        column_data = [column_to_dict(column) if isinstance(column, Column) else function_to_dict(column) for column in columns]
 
         return rows, column_data
 
@@ -487,4 +519,3 @@ if __name__ == '__main__':
     config = configparser.ConfigParser()
     config.read('../config.ini')
     s = DBService(config['database'])
-
