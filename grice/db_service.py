@@ -1,3 +1,4 @@
+# pylint: disable=C0103
 from collections import namedtuple
 import urllib
 
@@ -20,6 +21,7 @@ ColumnSort = namedtuple('ColumnSort', ['table_name', 'column_name', 'direction']
 ColumnFunction = namedtuple('ColumnFunction', ['table_name', 'column_name', 'func_name'])
 ColumnPair = namedtuple('ColumnPair', ['from_column', 'to_column'])
 TableJoin = namedtuple('TableJoin', ['table_name', 'column_pairs', 'outer_join'])
+QueryArguments = namedtuple('QueryArguments', ['column_names', 'page', 'per_page', 'filters', 'sorts', 'join', 'group_by', 'format_as_list'])
 
 
 def init_database(db_config):
@@ -442,50 +444,50 @@ class DBService:
 
         return table_to_dict(table)
 
-    def query_table(self, table_name, column_names: list=None, page: int=DEFAULT_PAGE, per_page: int=DEFAULT_PER_PAGE,
-                    filters: dict=None, sorts: dict=None, join: TableJoin=None, group_by: list=None, format_as_list: bool=False):
+    def query_table(self, table_name: str, quargs: QueryArguments):
+
         table = self.meta.tables.get(table_name, None)
         join_table = None
 
-        if join is not None:
-            join_table = self.meta.tables.get(join.table_name, None)
+        if quargs.join is not None:
+            join_table = self.meta.tables.get(quargs.join.table_name, None)
 
         rows = []
 
         if table is None:
-            raise NotFoundError('Table "{}" does exist'.format(table_name))
+            raise NotFoundError('Table "{}" does exist'.format(quargs.table_name))
 
-        if join is not None and join_table is None:
-            raise JoinError('Invalid join. Table with name "{}" does not exist.'.format(join.table_name))
+        if quargs.join is not None and join_table is None:
+            raise JoinError('Invalid join. Table with name "{}" does not exist.'.format(quargs.join.table_name))
 
-        columns = names_to_columns(column_names, table, join_table)
+        columns = names_to_columns(quargs.column_names, table, join_table)
 
         if len(columns) == 0:
             return [], []
 
         query = select(columns).apply_labels()
 
-        if per_page > -1:
-            query = query.limit(per_page).offset(page * per_page)
+        if quargs.per_page > -1:
+            query = query.limit(quargs.per_page).offset(quargs.page * quargs.per_page)
 
-        if filters is not None:
-            query = apply_column_filters(query, table, join_table, filters)
+        if quargs.filters is not None:
+            query = apply_column_filters(query, table, join_table, quargs.filters)
 
-        if sorts is not None:
-            query = apply_column_sorts(query, table, join_table, sorts)
+        if quargs.sorts is not None:
+            query = apply_column_sorts(query, table, join_table, quargs.sorts)
 
-        if join is not None:
-            query = apply_join(query, table, join_table, join)
+        if quargs.join is not None:
+            query = apply_join(query, table, join_table, quargs.join)
 
-        if group_by is not None:
-            query = apply_column_groups(query, table, join_table, group_by)
+        if quargs.group_by is not None:
+            query = apply_column_groups(query, table, join_table, quargs.group_by)
 
         with self.db.connect() as conn:
             result = conn.execute(query)
 
             for row in result:
                 count_of_map = {}
-                if format_as_list:
+                if quargs.format_as_list:
                     data = []
                     for column in columns:
                         if isinstance(column, Function):

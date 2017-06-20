@@ -1,9 +1,9 @@
 from collections import OrderedDict
 
-from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnFilter, ColumnSort, SORT_DIRECTIONS, \
-    ColumnPair, TableJoin, ColumnFunction, SUPPORTED_FUNCS
 from flask import Flask, jsonify, render_template, request
 
+from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnFilter, ColumnSort, SORT_DIRECTIONS, \
+    ColumnPair, TableJoin, ColumnFunction, QueryArguments, SUPPORTED_FUNCS
 from grice.errors import NotFoundError, JoinError
 
 
@@ -256,6 +256,19 @@ class DBController:
         self.db_service = db_service
         self.register_routes()
 
+    def get_query_args(self):
+        content = request.get_json(silent=True)
+
+        if not content:
+            column_names, page, per_page, filters, sorts, join, group_by = parse_query_args(request.args)
+            quargs = QueryArguments(column_names, page, per_page, filters, sorts, join, group_by,
+                                    format_as_list=request.args.get('_list', '').lower() in ['t', 'true', '1'])
+
+        else:
+            raise NotImplementedError("TODO!")
+
+        return quargs
+
     def tables_api(self):
         return jsonify(schemas=self.db_service.get_tables())
 
@@ -272,7 +285,7 @@ class DBController:
     table_api.methods = ['GET', 'POST']
 
     def query_api(self, name):
-        column_names, page, per_page, filters, sorts, join, group_by = parse_query_args(request.args)
+        quargs = self.get_query_args()
 
         try:
             table_info = self.db_service.get_table(name)
@@ -280,8 +293,7 @@ class DBController:
             return jsonify(success=False, error=str(e)), 404
 
         try:
-            rows, columns = self.db_service.query_table(name, column_names, page, per_page, filters, sorts, join, group_by,
-                format_as_list=request.args.get('_list', '').lower() in ['t', 'true', '1'])
+            rows, columns = self.db_service.query_table(name, quargs)
         except JoinError as e:
             return jsonify(error=str(e)), 400
 
@@ -297,21 +309,21 @@ class DBController:
     tables_page.methods = ['GET']
 
     def table_page(self, name):
-        column_names, page, per_page, filters, sorts, join, group_by = parse_query_args(request.args)
+        quargs = self.get_query_args()
 
         try:
             table = self.db_service.get_table(name)
         except NotFoundError:
             return table_not_found(name)
 
-        rows, columns = self.db_service.query_table(name, column_names, page, per_page, filters, sorts, join, group_by)
+        rows, columns = self.db_service.query_table(name, quargs)
         title = "{} - Grice".format(name)
 
-        return render_template('table.html', title=title, table=table, rows=rows, columns=columns, page=page + 1,
-                               per_page=per_page)
+        return render_template('table.html', title=title, table=table, rows=rows, columns=columns, page=quargs.page + 1,
+                               per_page=quargs.per_page)
 
     def chart_page(self, name):
-        column_names, page, per_page, filters, sorts, join, group_by = parse_query_args(request.args)
+        quargs = self.get_query_args()
         join_table = None
 
         try:
@@ -319,9 +331,9 @@ class DBController:
         except NotFoundError:
             return table_not_found(name)
 
-        if join:
+        if quargs.join:
             try:
-                join_table = self.db_service.get_table(join.table_name)
+                join_table = self.db_service.get_table(quargs.join.table_name)
             except NotFoundError:
                 # Bad join table name. Should probably warn the user, but ignoring for now.
                 pass
