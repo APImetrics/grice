@@ -210,18 +210,16 @@ def parse_column_funcs(column_list):
 
 def parse_col_names(column_names):
     """
-    This method takes a string of comma-seperated column names and returns a list of column names.
+    This method takes a string of comma-seperated column names and returns a list of unique
+    column names, preserving order.
 
     :param column_names: string
     :return: column_names: list
     """
     if column_names:
-        columns_dict = OrderedDict()
-
-        for column_name in column_names.split(','):
-            columns_dict[column_name.strip()] = True
-
-        column_names = list(columns_dict.keys())
+        clean_cols = (column_name.strip() for column_name in column_names.split(','))
+        unique_ordered = OrderedDict.fromkeys(clean_cols)
+        return list(unique_ordered)
 
     return column_names
 

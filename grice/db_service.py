@@ -354,7 +354,7 @@ def apply_column_sorts(query, table: Table, join_table: Table, sorts: dict):
 
     return query
 
-def apply_column_groups(query, table: Table, join_table: Table, group_by: list):
+def apply_group_by(query, table: Table, join_table: Table, group_by: list):
     """
     Adds sorts to a query object.
 
@@ -480,7 +480,7 @@ class DBService:
             query = apply_join(query, table, join_table, quargs.join)
 
         if quargs.group_by is not None:
-            query = apply_column_groups(query, table, join_table, quargs.group_by)
+            query = apply_group_by(query, table, join_table, quargs.group_by)
 
         with self.db.connect() as conn:
             result = conn.execute(query)
