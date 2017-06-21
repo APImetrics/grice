@@ -1,11 +1,14 @@
+import logging
 from collections import OrderedDict
 
 from flask import Flask, jsonify, render_template, request
 
-from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnFilter, ColumnSort, SORT_DIRECTIONS, \
-    ColumnPair, TableJoin, ColumnFunction, QueryArguments, SUPPORTED_FUNCS
+from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnSort, SORT_DIRECTIONS, \
+    ColumnPair, TableJoin, QueryArguments, SUPPORTED_FUNCS
+from grice.complex_filter import ComplexFilter, ColumnFilter, ColumnFunction
 from grice.errors import NotFoundError, JoinError
 
+log = logging.getLogger(__name__)  # pylint: disable=invalid-name
 
 def parse_pagination(page, per_page):
     try:
@@ -39,34 +42,81 @@ def parse_filter(filter_string: str):
 
     return ColumnFilter(column_name, filter_type, url_value=url_value)
 
+def _parse_filter_obj_dict(filters: dict, from_url: bool = False):
+    """
+    Parses a filter JSON dictionary.
 
-def parse_filters(filter_list):
+    expected format:
+        { "[OR|AND]" : [ ... list of filters ... ] }
+        where a filter is either the above dict, or:
+        column_name,filter_type,values;delimited;with;semicolons for multi-value filters i.e. in, not_in, between, or:
+        [column_name, filter_type, values]
+
+    :param filter_string: the filter dictionary.
+    :param from_url: whether the data source was a URL parameter
+    :return: ComplexFilter
+    """
+
+    if 'AND' in filters and 'OR' in filters:
+        raise ValueError('Expecting an AND or an OR in the filter, not both')
+
+    if 'AND' in filters:
+        # Find any ANDed filters that are on the same column - assume that should be an OR
+        grouped_filters = OrderedDict()
+        combos = []
+        for column_filter in filters.get('AND', []):
+            filter_obj = parse_filter_obj(column_filter, from_url)
+            if isinstance(filter_obj, ComplexFilter):
+                combos.append(filter_obj)
+            else:
+                column_name = filter_obj.column_name
+                if column_name not in grouped_filters:
+                    grouped_filters[column_name] = []
+                grouped_filters[column_name].append(filter_obj)
+
+        combined_filters = []
+        for filter_list in grouped_filters.values():
+            if len(filter_list) == 1:
+                combined_filters.append(filter_list[0])
+            else:
+                combined_filters.append(ComplexFilter(filter_list, False))
+        list_of_filters = combos + combined_filters
+
+    elif 'OR' in filters:
+        list_of_filters = [parse_filter_obj(f, from_url) for f in filters.get('OR', [])]
+    else:
+        raise ValueError('Expecting an AND or an OR in the filter')
+
+    return ComplexFilter(list_of_filters, 'AND' in filters)
+
+def parse_filter_obj(filters, from_url=False):
+
+    if isinstance(filters, dict):
+        return _parse_filter_obj_dict(filters)
+
+    if isinstance(filters, list):
+        if len(filters) != 3:
+            raise ValueError('Filter not correct length: {}'.format(str(filters)))
+        if from_url:
+            return ColumnFilter(filters[0], filters[1], url_value=filters[2])
+        return ColumnFilter(filters[0], filters[1], value=filters[2])
+
+    if isinstance(filters, str):
+        return parse_filter_obj([s.strip() for s in filters.split(',')], from_url=True)
+
+
+def parse_filters(filter_description: dict):
     """
     Parses the filter strings from the URL.
 
-    :param filter_list: List of filter strings from the URL.
-    :return: dict of column_name -> ColumnFilter
+    :param filter_description: Dictionary defining the ANDs and ORs required for the filter
+    :return: ComplexFilter object
     """
-    filters = {}
 
-    for filter_string in filter_list:
-        try:
-            column_filter = parse_filter(filter_string)
-        except ValueError:
-            # This means that the filter is not an acceptable filter type, so we'll ignore it. We should consider
-            # notifying the user that their filter was wrong.
-            continue
+    filter_list = [parse_filter_obj(filter_description)]
 
-        if column_filter is not None:
-            column_name = column_filter.column_name
-
-            if column_name not in filters:
-                filters[column_name] = []
-
-            filters[column_name].append(column_filter)
-
-    if len(filters):
-        return filters
+    if filter_list:
+        return ComplexFilter(list_of_filters=filter_list)
 
     return None
 
@@ -231,11 +281,11 @@ def parse_query_args(query_args):
     :return: column_names: list, page: int, per_page: int, filters: dict
     """
     page, per_page = parse_pagination(query_args.get('page'), query_args.get('perPage'))
-    filters = parse_filters(query_args.getlist('filter'))
+    filters = parse_filters(dict(AND=query_args.getlist('filter')))
     sorts = parse_sorts(query_args.getlist('sort'))
     join = parse_join(query_args.get('join'), False) or parse_join(query_args.get('outerjoin'), True)
     column_names = parse_column_funcs(query_args.getlist('columns')) or parse_column_funcs(query_args.get('cols', '').split(','))
-    group_by = parse_col_names(query_args.get('group_by', None))
+    group_by = parse_col_names(query_args.getlist('group_by', None))
 
     return column_names, page, per_page, filters, sorts, join, group_by
 
@@ -263,7 +313,13 @@ class DBController:
                                     format_as_list=request.args.get('_list', '').lower() in ['t', 'true', '1'])
 
         else:
-            raise NotImplementedError("TODO!")
+            page, per_page = parse_pagination(content.get('page'), content.get('perPage'))
+            filters = parse_filters(content.get('filter', []))
+            sorts = parse_sorts(content.get('sort', []))
+            join = parse_join(content.get('join'), False) or parse_join(content.get('outerjoin'), True)
+            column_names = parse_column_funcs(content.get('columns', [])) or parse_column_funcs(content.get('cols', '').split(','))
+            group_by = parse_col_names(content.get('group_by', []))
+            quargs = QueryArguments(column_names, page, per_page, filters, sorts, join, group_by, content.get('_list'))
 
         return quargs
 
@@ -297,7 +353,7 @@ class DBController:
 
         return jsonify(table=table_info, rows=rows, columns=columns)
 
-    query_api.methods = ['GET']
+    query_api.methods = ['GET', 'POST']
 
     def tables_page(self):
         tables = self.db_service.get_tables()
