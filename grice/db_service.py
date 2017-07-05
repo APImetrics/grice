@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, MetaData, Column, Table, select, asc, desc
 from sqlalchemy import engine
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.functions import Function
+from sqlalchemy.sql.expression import BinaryExpression
 from sqlalchemy.engine import reflection
 from grice.complex_filter import ComplexFilter, get_column
 from grice.errors import ConfigurationError, NotFoundError, JoinError
@@ -15,19 +16,22 @@ log = logging.getLogger(__name__)  # pylint: disable=invalid-name
 DEFAULT_PAGE = 0
 DEFAULT_PER_PAGE = 50
 SORT_DIRECTIONS = ['asc', 'desc']
-SUPPORTED_FUNCS = ['avg', 'count', 'min', 'max', 'sum']
+SUPPORTED_FUNCS = ['avg', 'count', 'min', 'max', 'sum', 'stddev_pop']
 ColumnSort = namedtuple('ColumnSort', ['table_name', 'column_name', 'direction'])
 ColumnPair = namedtuple('ColumnPair', ['from_column', 'to_column'])
 TableJoin = namedtuple('TableJoin', ['table_name', 'column_pairs', 'outer_join'])
 QueryArguments = namedtuple('QueryArguments', ['column_names', 'page', 'per_page', 'filters', 'sorts', 'join', 'group_by', 'format_as_list'])
 
-def init_database(db_config):
+def init_database(db_config, url):
     """
     Creates a SqlAlchemy engine object from a config file.
 
     :param db_config:
     :return: SqlAlchemy engine object.
     """
+    if url:
+        return create_engine(url)
+
     driver = db_config.get('driver', 'postgresql')
     try:
         db_args = {
@@ -49,11 +53,18 @@ def init_database(db_config):
 
 
 def function_to_dict(func: Function):
-    data = {
-        'name': str(func),
-        'primary_key': func.primary_key,
-        'table': '<Function {}>'.format(func.name),
-    }
+    if isinstance(func, Function):
+        data = {
+            'name': str(func),
+            'primary_key': func.primary_key,
+            'table': '<Function {}>'.format(func.name),
+        }
+    elif isinstance(func, BinaryExpression):
+        data = {
+            'name': str(func),
+            'primary_key': func.primary_key,
+            'table': '<BinaryExpression {}>'.format(func),
+        }
     return data
 
 def column_to_dict(column: Column):
@@ -184,9 +195,7 @@ def apply_group_by(query, table: Table, join_table: Table, group_by: list):
     :return: A SQLAlchemy select object modified to with sorts.
     """
     for group in group_by:
-        column = table.columns.get(group, None)
-        if join_table is not None and not column:
-            column = join_table.columns.get(group, None)
+        column = get_column(group, [table, join_table])
 
         if column is not None:
             query = query.group_by(column)
@@ -229,9 +238,9 @@ class DBService:
     TODO:
         - Add methods for saving table queries
     """
-    def __init__(self, db_config):
+    def __init__(self, db_config, url=None):
         self.meta = MetaData()
-        self.db = init_database(db_config)
+        self.db = init_database(db_config, url)
         self._reflect_database()
 
     def _reflect_database(self):
@@ -305,32 +314,22 @@ class DBService:
             log.debug("Query %s", query)
             result = conn.execute(query)
 
-            for row in result:
-                count_of_map = {}
-                if quargs.format_as_list:
-                    data = []
-                    for column in columns:
-                        if isinstance(column, Function):
-                            counter = count_of_map.get(column.name, 0) + 1
-                            count_of_map[column.name] = counter
-                            column_label = column.name + '_' + str(counter)
-                        else:
-                            column_label = column.table.name + '_' + column.name
-                        data.append(row[column_label])
-                else:
-                    data = {}
-                    for column in columns:
-                        if isinstance(column, Function):
-                            counter = count_of_map.get(column.name, 0) + 1
-                            count_of_map[column.name] = counter
-                            full_column_name = column.name + '_' + str(counter)
-                            column_label = column.name + '_' + str(counter)
-                        else:
-                            full_column_name = column.table.name + '.' + column.name
-                            column_label = column.table.name + '_' + column.name
-                        data[full_column_name] = row[column_label]
+            if quargs.format_as_list:
+                rows = [[item for item in row] for row in result]
+            else:
+                column_name_map = {}
+                first_row = True
+                for row in result:
+                    # Make friendlier names if possible
+                    if first_row:
+                        for column, column_label in zip(columns, row.keys()):
+                            if isinstance(column, Column):
+                                full_column_name = column.table.name + '.' + column.name
+                                column_name_map[column_label] = full_column_name
+                        first_row = False
 
-                rows.append(data)
+                    data = {column_name_map.get(key, key): val for key, val in row.items()}
+                    rows.append(data)
 
         column_data = [column_to_dict(column) if isinstance(column, Column) else function_to_dict(column) for column in columns]
 

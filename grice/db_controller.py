@@ -1,7 +1,9 @@
 import logging
+import os
 from collections import OrderedDict
+from functools import wraps
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, render_template, request, abort
 
 from grice.db_service import DBService, DEFAULT_PAGE, DEFAULT_PER_PAGE, ColumnSort, SORT_DIRECTIONS, \
     ColumnPair, TableJoin, QueryArguments, SUPPORTED_FUNCS
@@ -9,6 +11,27 @@ from grice.complex_filter import ComplexFilter, ColumnFilter, ColumnFunction
 from grice.errors import NotFoundError, JoinError
 
 log = logging.getLogger(__name__)  # pylint: disable=invalid-name
+
+API_KEY = os.environ.get('GRICE_API_KEY')
+
+if API_KEY:
+    def check_for_auth(func):
+        log.debug('Wrapping func %s', func.__name__)
+
+        @wraps(func)
+        def decorated_function(*args, **kwargs):
+            req_header = request.headers.get('Authorization')
+            log.debug('In decorated function %s - %s', req_header, API_KEY)
+            if req_header == API_KEY:
+                return func(*args, **kwargs)
+            log.info("Access denied")
+            return abort(403)
+
+        return decorated_function
+
+else:
+    def check_for_auth(func):
+        return func
 
 def parse_pagination(page, per_page):
     try:
@@ -219,6 +242,14 @@ def parse_column_func(column_string):
     :return:
     """
     table_name = None
+    clean_vals = [s.strip() for s in column_string.split('::')]
+    if len(clean_vals) == 3:
+        column_string, operator_name, operator_value = clean_vals
+    else:
+        column_string = clean_vals[0]
+        operator_name = None
+        operator_value = None
+
     clean_vals = [s.strip() for s in column_string.split(':')]
     column_name = clean_vals[-1]
     func_name = None
@@ -238,7 +269,7 @@ def parse_column_func(column_string):
         # This means the column name is not in the table_name.column_name format, which is fine.
         pass
 
-    return ColumnFunction(table_name, column_name, func_name)
+    return ColumnFunction(table_name, column_name, func_name, operator_name, operator_value)
 
 def parse_column_funcs(column_list):
     """
@@ -267,7 +298,7 @@ def parse_col_names(column_names):
     :return: column_names: list
     """
     if column_names:
-        clean_cols = (column_name.strip() for column_name in column_names.split(','))
+        clean_cols = (column_name.strip() for column_name in column_names)
         unique_ordered = OrderedDict.fromkeys(clean_cols)
         return list(unique_ordered)
 
@@ -285,7 +316,7 @@ def parse_query_args(query_args):
     sorts = parse_sorts(query_args.getlist('sort'))
     join = parse_join(query_args.get('join'), False) or parse_join(query_args.get('outerjoin'), True)
     column_names = parse_column_funcs(query_args.getlist('columns')) or parse_column_funcs(query_args.get('cols', '').split(','))
-    group_by = parse_col_names(query_args.getlist('group_by', None))
+    group_by = parse_column_funcs(query_args.getlist('group_by', None))
 
     return column_names, page, per_page, filters, sorts, join, group_by
 
@@ -318,16 +349,18 @@ class DBController:
             sorts = parse_sorts(content.get('sort', []))
             join = parse_join(content.get('join'), False) or parse_join(content.get('outerjoin'), True)
             column_names = parse_column_funcs(content.get('columns', [])) or parse_column_funcs(content.get('cols', '').split(','))
-            group_by = parse_col_names(content.get('group_by', []))
+            group_by = parse_column_funcs(content.get('group_by', []))
             quargs = QueryArguments(column_names, page, per_page, filters, sorts, join, group_by, content.get('_list'))
 
         return quargs
 
+    @check_for_auth
     def tables_api(self):
         return jsonify(schemas=self.db_service.get_tables())
 
     tables_api.methods = ['GET']
 
+    @check_for_auth
     def table_api(self, name):
         try:
             table_info = self.db_service.get_table(name)
@@ -338,6 +371,7 @@ class DBController:
 
     table_api.methods = ['GET', 'POST']
 
+    @check_for_auth
     def query_api(self, name):
         quargs = self.get_query_args()
 
@@ -355,6 +389,7 @@ class DBController:
 
     query_api.methods = ['GET', 'POST']
 
+    @check_for_auth
     def tables_page(self):
         tables = self.db_service.get_tables()
 
@@ -405,9 +440,9 @@ class DBController:
 
     def register_routes(self):
         # API Routes
-        self.app.add_url_rule('/api/db/tables', 'tables_api', self.tables_api)
-        self.app.add_url_rule('/api/db/tables/<name>', 'table_api', self.table_api)
-        self.app.add_url_rule('/api/db/tables/<name>/query', 'query_api', self.query_api)
+        self.app.add_url_rule('/db/api/tables', 'tables_api', self.tables_api)
+        self.app.add_url_rule('/db/api/tables/<name>', 'table_api', self.table_api)
+        self.app.add_url_rule('/db/api/tables/<name>/query', 'query_api', self.query_api)
 
         # HTML Pages
         self.app.add_url_rule('/db', 'db_index', self.tables_page)
